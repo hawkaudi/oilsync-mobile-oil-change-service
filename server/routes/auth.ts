@@ -226,64 +226,97 @@ const sendSMSOTP = async (
 export const handleLogin: RequestHandler = async (req, res) => {
   try {
     console.log("🔐 [LOGIN] Raw body:", req.body);
+    console.log("🔐 [LOGIN] Body type:", typeof req.body);
+    console.log("🔐 [LOGIN] Body keys:", Object.keys(req.body || {}));
 
     let email: string;
     let password: string;
+    let parsedData: any = null;
 
-    // Handle Netlify's broken body parsing
-    if (req.body && typeof req.body === "object" && req.body["0"]) {
-      console.log("🔧 [LOGIN] Converting character codes...");
-      const codes = Object.values(req.body) as number[];
-      const jsonString = String.fromCharCode(...codes);
-      console.log("🔧 [LOGIN] JSON string:", jsonString);
-      const parsed = JSON.parse(jsonString);
-      email = parsed.email;
-      password = parsed.password;
-    } else {
+    // Handle Netlify's broken body parsing - character codes format
+    if (req.body && typeof req.body === "object" && req.body["0"] !== undefined) {
+      console.log("🔧 [LOGIN] Detected Netlify character codes format");
+      try {
+        const codes = Object.values(req.body) as number[];
+        console.log("🔧 [LOGIN] Character codes count:", codes.length);
+        console.log("🔧 [LOGIN] First 10 codes:", codes.slice(0, 10));
+        
+        const jsonString = String.fromCharCode(...codes);
+        console.log("🔧 [LOGIN] Reconstructed JSON string:", jsonString);
+        
+        parsedData = JSON.parse(jsonString);
+        console.log("🔧 [LOGIN] Parsed data:", parsedData);
+        
+        email = parsedData.email;
+        password = parsedData.password;
+        
+        console.log("🔧 [LOGIN] Extracted email:", email);
+        console.log("🔧 [LOGIN] Password extracted:", !!password);
+      } catch (parseError) {
+        console.error("💥 [LOGIN] Failed to parse character codes:", parseError);
+        return res.status(400).json({
+          success: false,
+          message: "Invalid request format - failed to parse body",
+          debug: {
+            error: parseError.message,
+            bodyType: typeof req.body,
+            hasCharacterCodes: req.body && req.body["0"] !== undefined
+          }
+        } as AuthResponse);
+      }
+    } else if (req.body && typeof req.body === "object") {
+      // Normal JSON body
+      console.log("🔧 [LOGIN] Using normal JSON body");
       email = req.body.email;
       password = req.body.password;
-    }
-
-    console.log("🔐 [LOGIN] Email:", email);
-
-    if (!email || !password) {
+      parsedData = req.body;
+    } else {
+      console.error("💥 [LOGIN] Unexpected body format");
       return res.status(400).json({
         success: false,
-        message: "Email and password are required",
-      });
+        message: "Invalid request format",
+        debug: {
+          bodyType: typeof req.body,
+          body: req.body
+        }
+      } as AuthResponse);
     }
 
-    logAuthOperation("LOGIN_ATTEMPT", email, false, req);
+    console.log("🔐 [LOGIN] Final extracted email:", email);
+    console.log("🔐 [LOGIN] Final password provided:", !!password);
 
-    console.log("🔍 [NETLIFY_DEBUG] Parsed email:", email);
-    console.log("🔍 [NETLIFY_DEBUG] Password provided:", !!password);
-
+    // Validation
     if (!email || !password) {
+      console.log("❌ [LOGIN] Missing email or password");
       logAuthOperation("LOGIN_FAILED", email || "unknown", false, req);
-      log("WARN", "AUTH", "Login failed: Missing credentials", undefined, req);
-      console.log("❌ [NETLIFY_DEBUG] Missing credentials, returning 400");
       return res.status(400).json({
         success: false,
         message: "Email and password are required",
+        debug: {
+          emailProvided: !!email,
+          passwordProvided: !!password,
+          parsedData: parsedData
+        }
       } as AuthResponse);
     }
 
     if (!validateEmail(email)) {
+      console.log("❌ [LOGIN] Invalid email format:", email);
       logAuthOperation("LOGIN_FAILED", email, false, req);
-      log("WARN", "AUTH", "Login failed: Invalid email format", { email }, req);
       return res.status(400).json({
         success: false,
         message: "Invalid email format",
       } as AuthResponse);
     }
 
-    console.log("🔍 [NETLIFY_DEBUG] Attempting authentication for:", email);
+    logAuthOperation("LOGIN_ATTEMPT", email, false, req);
+    console.log("🔍 [LOGIN] Attempting authentication for:", email);
+
     const authResult = await authenticateUser(email, password, req);
 
     if (!authResult) {
+      console.log("❌ [LOGIN] Authentication failed for:", email);
       logAuthOperation("LOGIN_FAILED", email, false, req);
-      log("WARN", "AUTH", "Login failed: Invalid credentials", { email }, req);
-      console.log("❌ [NETLIFY_DEBUG] Authentication failed, returning 401");
       return res.status(401).json({
         success: false,
         message: "Invalid email or password",
@@ -291,6 +324,8 @@ export const handleLogin: RequestHandler = async (req, res) => {
     }
 
     const { user, token } = authResult;
+    console.log("✅ [LOGIN] Authentication successful for:", email);
+    
     logAuthOperation("LOGIN_SUCCESS", email, true, req);
     logBusinessOperation(
       "USER_SESSION_CREATED",
@@ -298,15 +333,6 @@ export const handleLogin: RequestHandler = async (req, res) => {
       { userId: user.id, role: user.role },
       req,
     );
-
-    console.log(
-      "✅ [NETLIFY_DEBUG] Authentication successful, preparing response",
-    );
-    console.log("✅ [NETLIFY_DEBUG] User data:", {
-      id: user.id,
-      email: user.email,
-      role: user.role,
-    });
 
     const response = {
       success: true,
@@ -326,16 +352,14 @@ export const handleLogin: RequestHandler = async (req, res) => {
       },
     } as AuthResponse;
 
-    console.log("✅ [NETLIFY_DEBUG] Response object:", response);
-    console.log("✅ [NETLIFY_DEBUG] Sending JSON response with status 200");
-
-    // Ensure proper JSON response
+    console.log("✅ [LOGIN] Sending successful response");
     res.setHeader("Content-Type", "application/json");
     res.status(200).json(response);
+    
   } catch (error) {
-    console.error("💥 [NETLIFY_DEBUG] Login error caught:", error);
-    console.error("💥 [NETLIFY_DEBUG] Error message:", error.message);
-    console.error("💥 [NETLIFY_DEBUG] Error stack:", error.stack);
+    console.error("💥 [LOGIN] Unexpected error:", error);
+    console.error("💥 [LOGIN] Error message:", error.message);
+    console.error("💥 [LOGIN] Error stack:", error.stack);
 
     log(
       "ERROR",
@@ -354,7 +378,6 @@ export const handleLogin: RequestHandler = async (req, res) => {
       },
     } as AuthResponse;
 
-    console.error("💥 [NETLIFY_DEBUG] Sending error response:", errorResponse);
     res.setHeader("Content-Type", "application/json");
     res.status(500).json(errorResponse);
   }
@@ -362,21 +385,76 @@ export const handleLogin: RequestHandler = async (req, res) => {
 
 export const handleRegister: RequestHandler = async (req, res) => {
   try {
-    console.log(`[AUTH] Registration attempt for: ${req.body.email}`);
+    console.log("📝 [REGISTER] Raw body:", req.body);
+    console.log("📝 [REGISTER] Body type:", typeof req.body);
 
-    const { firstName, lastName, email, phone, password }: RegisterRequest =
-      req.body;
+    let firstName: string;
+    let lastName: string;
+    let email: string;
+    let phone: string;
+    let password: string;
+    let parsedData: any = null;
+
+    // Handle Netlify's broken body parsing - character codes format
+    if (req.body && typeof req.body === "object" && req.body["0"] !== undefined) {
+      console.log("🔧 [REGISTER] Detected Netlify character codes format");
+      try {
+        const codes = Object.values(req.body) as number[];
+        const jsonString = String.fromCharCode(...codes);
+        console.log("🔧 [REGISTER] Reconstructed JSON string:", jsonString);
+        
+        parsedData = JSON.parse(jsonString);
+        console.log("🔧 [REGISTER] Parsed data:", parsedData);
+        
+        firstName = parsedData.firstName;
+        lastName = parsedData.lastName;
+        email = parsedData.email;
+        phone = parsedData.phone;
+        password = parsedData.password;
+      } catch (parseError) {
+        console.error("💥 [REGISTER] Failed to parse character codes:", parseError);
+        return res.status(400).json({
+          success: false,
+          message: "Invalid request format - failed to parse body",
+        } as AuthResponse);
+      }
+    } else if (req.body && typeof req.body === "object") {
+      // Normal JSON body
+      console.log("🔧 [REGISTER] Using normal JSON body");
+      const data: RegisterRequest = req.body;
+      firstName = data.firstName;
+      lastName = data.lastName;
+      email = data.email;
+      phone = data.phone;
+      password = data.password;
+      parsedData = req.body;
+    } else {
+      console.error("💥 [REGISTER] Unexpected body format");
+      return res.status(400).json({
+        success: false,
+        message: "Invalid request format",
+      } as AuthResponse);
+    }
+
+    console.log(`📝 [REGISTER] Registration attempt for: ${email}`);
 
     if (!firstName || !lastName || !email || !phone || !password) {
-      console.log(`[AUTH] Registration failed: Missing required fields`);
+      console.log(`❌ [REGISTER] Missing required fields`);
       return res.status(400).json({
         success: false,
         message: "All fields are required",
+        debug: {
+          firstName: !!firstName,
+          lastName: !!lastName,
+          email: !!email,
+          phone: !!phone,
+          password: !!password,
+        }
       } as AuthResponse);
     }
 
     if (!validateEmail(email)) {
-      console.log(`[AUTH] Registration failed: Invalid email format`);
+      console.log(`❌ [REGISTER] Invalid email format: ${email}`);
       return res.status(400).json({
         success: false,
         message: "Invalid email format",
@@ -386,7 +464,7 @@ export const handleRegister: RequestHandler = async (req, res) => {
     // Check if user already exists
     const existingUser = await getUserByEmail(email, req);
     if (existingUser) {
-      console.log(`[AUTH] Registration failed: Email already exists`);
+      console.log(`❌ [REGISTER] Email already exists: ${email}`);
       return res.status(409).json({
         success: false,
         message: "Email already registered",
@@ -406,7 +484,7 @@ export const handleRegister: RequestHandler = async (req, res) => {
       req,
     );
 
-    console.log(`[AUTH] Registration successful for: ${email}`);
+    console.log(`✅ [REGISTER] Registration successful for: ${email}`);
 
     // Authenticate the newly created user to get a token
     const authResult = await authenticateUser(email, password, req);
@@ -434,11 +512,11 @@ export const handleRegister: RequestHandler = async (req, res) => {
       },
     } as AuthResponse);
   } catch (error) {
-    console.error(`[AUTH] Registration error:`, error);
+    console.error(`💥 [REGISTER] Registration error:`, error);
     res.status(500).json({
       success: false,
-      message: error.message.includes("already exists")
-        ? error.message
+      message: (error as Error).message.includes("already exists")
+        ? (error as Error).message
         : "Internal server error",
     } as AuthResponse);
   }
@@ -446,12 +524,48 @@ export const handleRegister: RequestHandler = async (req, res) => {
 
 export const handleSendOTP: RequestHandler = async (req, res) => {
   try {
-    console.log(`[OTP] Sending OTP to: ${req.body.identifier}`);
+    console.log("📨 [OTP] Raw body:", req.body);
 
-    const { identifier, type, purpose }: OTPRequest = req.body;
+    let identifier: string;
+    let type: string;
+    let purpose: string;
+
+    // Handle Netlify's broken body parsing - character codes format
+    if (req.body && typeof req.body === "object" && req.body["0"] !== undefined) {
+      console.log("🔧 [OTP] Detected Netlify character codes format");
+      try {
+        const codes = Object.values(req.body) as number[];
+        const jsonString = String.fromCharCode(...codes);
+        const parsedData = JSON.parse(jsonString);
+        
+        identifier = parsedData.identifier;
+        type = parsedData.type;
+        purpose = parsedData.purpose;
+      } catch (parseError) {
+        console.error("💥 [OTP] Failed to parse character codes:", parseError);
+        return res.status(400).json({
+          success: false,
+          message: "Invalid request format - failed to parse body",
+        } as ApiResponse);
+      }
+    } else if (req.body && typeof req.body === "object") {
+      // Normal JSON body
+      const data: OTPRequest = req.body;
+      identifier = data.identifier;
+      type = data.type;
+      purpose = data.purpose;
+    } else {
+      console.error("💥 [OTP] Unexpected body format");
+      return res.status(400).json({
+        success: false,
+        message: "Invalid request format",
+      } as ApiResponse);
+    }
+
+    console.log(`📨 [OTP] Sending OTP to: ${identifier}`);
 
     if (!identifier || !type || !purpose) {
-      console.log(`[OTP] Failed: Missing required fields`);
+      console.log(`❌ [OTP] Missing required fields`);
       return res.status(400).json({
         success: false,
         message: "Identifier, type, and purpose are required",
@@ -459,7 +573,7 @@ export const handleSendOTP: RequestHandler = async (req, res) => {
     }
 
     if (type === "email" && !validateEmail(identifier)) {
-      console.log(`[OTP] Failed: Invalid email format`);
+      console.log(`❌ [OTP] Invalid email format: ${identifier}`);
       return res.status(400).json({
         success: false,
         message: "Invalid email format",
@@ -481,20 +595,20 @@ export const handleSendOTP: RequestHandler = async (req, res) => {
     }
 
     if (!sent) {
-      console.log(`[OTP] Failed to send OTP to ${identifier}`);
+      console.log(`❌ [OTP] Failed to send OTP to ${identifier}`);
       return res.status(500).json({
         success: false,
         message: "Failed to send OTP",
       } as ApiResponse);
     }
 
-    console.log(`[OTP] OTP sent successfully to: ${identifier}`);
+    console.log(`✅ [OTP] OTP sent successfully to: ${identifier}`);
     res.json({
       success: true,
       message: "OTP sent successfully",
     } as ApiResponse);
   } catch (error) {
-    console.error(`[OTP] Send error:`, error);
+    console.error(`💥 [OTP] Send error:`, error);
     res.status(500).json({
       success: false,
       message: "Internal server error",
